@@ -18,174 +18,105 @@ import numpy as np
 import warnings
 warnings.filterwarnings('ignore')
 
-import seaborn as sns
+# ML
+import statsmodels.api as sm
+import patsy
 
-from google.colab import drive
-drive.mount('/content/drive')
+
+
+# from google.colab import drive
+# drive.mount('/content/drive')
 
 ##Replace with your path to the Proj2_Data folder on GoogleColab
-path_to_data='/content/drive/MyDrive/MastersDegree/CS598 PSL/Assignments/Projects/Project2/MyCode/Proj2_Data'
+path_to_data='Proj2_Data'
 
 """## **Data Exploration**"""
 
-proj2_data_train = pd.read_csv(f'{path_to_data}/fold_1/train.csv')
-proj2_data_test = pd.read_csv(f'{path_to_data}/fold_1/test.csv')
+train = pd.read_csv(f'{path_to_data}/fold_1/train.csv')
+test = pd.read_csv(f'{path_to_data}/fold_1/test.csv')
 
-# Preview the first 5 lines of the train loaded data
-proj2_data_train
+data_train = train.copy()
+data_test = test.copy()
 
-# Preview the first 5 lines of the test loaded data
-proj2_data_test.head()
+# Filling missing values
+data_train.isna().sum()[data_train.isna().sum() > 0].sort_values(ascending=False)
+data_test.isna().sum()[data_test.isna().sum() > 0].sort_values(ascending=False)
+data_train.fillna(0, inplace = True)
+data_test.fillna(0, inplace = True)
 
-proj2_data_train.shape
+# Preprocessing the data
+def preprocess(data):
+    tmp = pd.to_datetime(data['Date'])
+    data['Wk'] = tmp.dt.isocalendar().week
+    data['Yr'] = tmp.dt.year
+    data['Wk'] = pd.Categorical(data['Wk'], categories=[i for i in range(1, 53)])  # 52 weeks
+#    data['IsHoliday'] = data['IsHoliday'].apply(int)
+    return data
 
-proj2_data_test.shape
-
-proj2_data_train.isnull().sum()
-
-proj2_data_train.info()
-
-"""##Approach I
-I began with a simplistic strategy: using the sales data from the most recent week to forecast all subsequent weekly sales. For instance, during the first iteration (t=1), our objective is to forecast sales for March and April of 2011. For every store-department combination, I referenced the sales data from the final week of February 2011 and used it as a basis for predicting sales throughout March and April of 2011.
-
-If any data from that particular week is absent, I substitute the missing values with zeros.
-
-Below is my code for a particular fold.
-"""
-
+train = pd.read_csv(f'{path_to_data}/fold_1/train.csv')
+test = pd.read_csv(f'{path_to_data}/fold_1/test.csv')
 
 
-num_folds = 10
-for i in range(num_folds):
-    train = pd.read_csv(f'{path_to_data}/fold_{i+1}/train.csv')
-    test = pd.read_csv(f'{path_to_data}/fold_{i+1}/test.csv')
+# pre-allocate a pd to store the predictions
+test_pred = pd.DataFrame()
 
-    most_recent_date = train['Date'].max()
+train_pairs = train[['Store', 'Dept']].drop_duplicates(ignore_index=True)
+test_pairs = test[['Store', 'Dept']].drop_duplicates(ignore_index=True)
+unique_pairs = pd.merge(train_pairs, test_pairs, how = 'inner', on =['Store', 'Dept'])
 
-    # Filter and select necessary columns
-    tmp_train = train[train['Date'] == most_recent_date].copy()
-    tmp_train.rename(columns={'Weekly_Sales': 'Weekly_Pred'}, inplace=True)
-    tmp_train = tmp_train.drop(columns=['Date', 'IsHoliday'])
+train_split = unique_pairs.merge(train, on=['Store', 'Dept'], how='left')
+train_split = preprocess(train_split)
+X = patsy.dmatrix('Weekly_Sales + Store + Dept + Yr  + Wk',
+                  data = train_split,
+                  return_type='dataframe')
 
-    # Left join with the test data
-    test_pred = test.merge(tmp_train, on=['Dept', 'Store'], how='left')
-
-    # Fill NaN values with 0 for the Weekly_Pred column
-    test_pred['Weekly_Pred'].fillna(0, inplace=True)
-
-    # Write the output to CSV
-    test_pred.to_csv(f'{path_to_data}/fold_{i+1}/mypred.csv', index=False)
-
-"""After running the script in each of the 10 folders, I generated a mypred.csv file in each folder.
-
-Next, I used the following function to calculate the weighted mean absolute error. The same function will be used to evaluate your performance.
-
-Within the function, I first load the complete test data along with the labels. Then, I loop through each of the 10 folds, extracting the corresponding subset based on the test range for that fold, and compute the performance.
-"""
-
-def myeval():
-    test_with_label = pd.read_csv(f'{path_to_data}/test_with_label.csv')
-    num_folds = 10
-    wae = []
-
-    for i in range(num_folds):
-        file_path = f'{path_to_data}/fold_{i+1}/test.csv'
-        test = pd.read_csv(file_path)
-        test = test.drop(columns=['IsHoliday']).merge(test_with_label, on=['Date', 'Store', 'Dept'])
-
-        file_path = f'{path_to_data}/fold_{i+1}/mypred.csv'
-        test_pred = pd.read_csv(file_path)
-        test_pred = test_pred.drop(columns=['IsHoliday'])
-
-        new_test = test.merge(test_pred, on=['Date', 'Store', 'Dept'], how='left')
-
-        actuals = new_test['Weekly_Sales']
-        preds = new_test['Weekly_Pred']
-        weights = new_test['IsHoliday'].apply(lambda x: 5 if x else 1)
-        wae.append(sum(weights * abs(actuals - preds)) / sum(weights))
-
-    return wae
-
-"""Below are the errors across 10 folds.
+train_split = dict(tuple(X.groupby(['Store', 'Dept'])))
 
 
-"""
+test_split = unique_pairs.merge(test, on=['Store', 'Dept'], how='left')
+test_split = preprocess(test_split)
+X = patsy.dmatrix('Store + Dept + Yr  + Wk', 
+                    data = test_split, 
+                    return_type='dataframe')
+X['Date'] = test_split['Date']
+test_split = dict(tuple(X.groupby(['Store', 'Dept'])))
 
-wae = myeval()
-for value in wae:
-    print(f"\t{value:.3f}")
-print(f"{sum(wae) / len(wae):.3f}")
+keys = list(train_split)
 
-"""## Approach II
-The initial approach did not yield satisfactory results. A closer inspection of the time series plots for various store and department combinations led us to refine our model. Now, for each week we're predicting, we'll leverage data from the corresponding week in the previous year.
+for key in keys:
+    X_train = train_split[key]
+    X_test = test_split[key]
+ 
+    Y = X_train['Weekly_Sales']
+    X_train = X_train.drop(['Weekly_Sales','Store', 'Dept'], axis=1)
+    
+    cols_to_drop = X_train.columns[(X_train == 0).all()]
+    X_train = X_train.drop(columns=cols_to_drop)
+    X_test = X_test.drop(columns=cols_to_drop)
+ 
+    cols_to_drop = []
+    for i in range(len(X_train.columns) - 1, 1, -1):  # Start from the last column and move backward
+        col_name = X_train.columns[i]
+        # Extract the current column and all previous columns
+        tmp_Y = X_train.iloc[:, i].values
+        tmp_X = X_train.iloc[:, :i].values
 
-By "corresponding week", we introduce a new variable, "Wk", to numerically represent each week of the year, ranging from 1 to 52 (or occasionally 53). For instance, when predicting sales for Week 20 of 2011, we'd consult the data from Week 20 of 2010.
+        coefficients, residuals, rank, s = np.linalg.lstsq(tmp_X, tmp_Y, rcond=None)
+        if np.sum(residuals) < 1e-16:
+                cols_to_drop.append(col_name)
+            
+    X_train = X_train.drop(columns=cols_to_drop)
+    X_test = X_test.drop(columns=cols_to_drop)
 
-In R, we encountered a misalignment issue: the final week of 2010 is labeled as Week 53, whereas 2011's is Week 52. This discrepancy is particularly problematic since both weeks usually represent the Christmas holidays.
-
-In Python, we are lucky: within our specific time range, each year consistently consists of 52 weeks and the weeks align perfectly:
-
-Wk = 6, Super Bowl
-Wk = 36, Labor Day
-Wk = 47, Thanksgiving
-Wk = 52, Christmas
-"""
-
-date = datetime.strptime("2010-01-01", "%Y-%m-%d") # this is outside our time range
-print(date.isocalendar()[1])
-date = datetime.strptime("2010-01-04", "%Y-%m-%d")
-print(date.isocalendar()[1])
-date = datetime.strptime("2010-12-31", "%Y-%m-%d")
-print(date.isocalendar()[1])
-
-date = datetime.strptime("2011-01-07", "%Y-%m-%d")
-print(date.isocalendar()[1])
-date = datetime.strptime("2011-12-30", "%Y-%m-%d")
-print(date.isocalendar()[1])
-
-date = datetime.strptime("2012-01-06", "%Y-%m-%d")
-print(date.isocalendar()[1])
-date = datetime.strptime("2012-12-28", "%Y-%m-%d")
-print(date.isocalendar()[1])
-
-num_folds = 10
-for i in range(num_folds):
-    train = pd.read_csv(f'{path_to_data}/fold_{i+1}/train.csv')
-    test = pd.read_csv(f'{path_to_data}/fold_{i+1}/test.csv')
-
-    # Define start and end dates based on test data
-    start_last_year = pd.to_datetime(test['Date'].min()) - timedelta(days=375)
-    end_last_year = pd.to_datetime(test['Date'].max()) - timedelta(days=350)
-
-    # Filter train data based on the defined dates and compute 'Wk' column
-    tmp_train = train[(train['Date'] > str(start_last_year))
-                      & (train['Date'] < str(end_last_year))].copy()
-    tmp_train['Date'] = pd.to_datetime(tmp_train['Date'])
-    tmp_train['Wk'] = tmp_train['Date'].dt.isocalendar().week
-    tmp_train.rename(columns={'Weekly_Sales': 'Weekly_Pred'}, inplace=True)
-    tmp_train.drop(columns=['Date', 'IsHoliday'], inplace=True)
-
-    # Compute 'Wk' column for test data
-    test['Date'] = pd.to_datetime(test['Date'])
-    test['Wk'] = test['Date'].dt.isocalendar().week
-
-    # Left join with the tmp_train data
-    test_pred = test.merge(tmp_train, on=['Dept', 'Store', 'Wk'], how='left').drop(columns=['Wk'])
-
-    # Fill NaN values with 0 for the Weekly_Pred column
-    test_pred['Weekly_Pred'].fillna(0, inplace=True)
-
-
-    # Write the output to CSV
-    test_pred.to_csv(f'{path_to_data}/fold_{i+1}/mypred.csv', index=False)
-
-"""In the implementation, when sourcing data from the corresponding week in the previous year, I didn't precisely offset by 365 days from the test period's start or end. Instead, I slightly expanded the range (subtracting a bit more than 365 days from the starting date and a bit less from the ending date). This adjustment helps to circumvent potential misalignments arising from our week counting method.
-
-Below is the performance.
-"""
-
-wae = myeval()
-
-for value in wae:
-    print(f"\t{value:.3f}")
-print(f"{sum(wae) / len(wae):.3f}")
+    model = sm.OLS(Y, X_train).fit()
+    mycoef = model.params.fillna(0)
+    
+    tmp_pred = X_test[['Store', 'Dept', 'Date']]
+    X_test = X_test.drop(['Store', 'Dept', 'Date'], axis=1)
+    
+    tmp_pred['Weekly_Pred'] = np.dot(X_test, mycoef)
+    test_pred = pd.concat([test_pred, tmp_pred], ignore_index=True)
+    
+test_pred['Weekly_Pred'].fillna(0, inplace=True)
+# Write the output to CSV
+test_pred.to_csv(f'{path_to_data}/fold_1/mypred.csv', index=False)
