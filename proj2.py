@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 import warnings
 import statsmodels.api as sm
+from statsmodels.api import OLS, add_constant
+
 import patsy
 
 from datetime import timedelta
@@ -12,8 +14,9 @@ import logging
 import numpy as np
 import pandas as pd
 from time import time
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.metrics import mean_squared_error
+from sklearn.decomposition import TruncatedSVD
+import matplotlib.pyplot as plt
+
 
 # Configure logging
 logging.basicConfig(
@@ -28,16 +31,38 @@ warnings.filterwarnings('ignore')
 # Configuration
 DATA_DIR = "/Users/zelal-ezaldeen/Documents/Zelal/MastersDegree/Y2/CS598psl/Assignments/Projects/project2/Data/Proj2_Data"
 
+
+# Feature Engineering
 def preprocess(data):
     """Preprocess the data by handling missing values and creating time-based features."""
     data.fillna(0, inplace=True)
-
     tmp = pd.to_datetime(data['Date'])
     data['Wk'] = tmp.dt.isocalendar().week
     data['Yr'] = tmp.dt.year
+    data['Yr2'] = data.Yr ** 2
     data['Wk'] = pd.Categorical(data['Wk'], categories=[i for i in range(1, 53)])
     data['IsHoliday'] = data['IsHoliday'].apply(int)
+    # data['Is_SuperBowl'] = (data['Wk'] == 6).astype(int)
+    # data['Is_Thanksgiving'] = (data['Wk'] == 47).astype(int)
+    # data['Is_Christmas'] = (data['Wk'] == 52).astype(int)
     return data
+
+
+
+# Function to mark holiday weeks
+def add_holiday_flags(df):
+     # Convert dates to datetime
+    df['Date'] = pd.to_datetime(df['Date'])
+
+    # Extract week, year, and other useful features
+    df['Wk'] = df['Date'].dt.isocalendar().week
+    df['Yr'] = df['Date'].dt.year
+    df['Wk'] = df['Date'].dt.isocalendar().week
+    df['Yr'] = df['Date'].dt.year
+    # df['Is_SuperBowl'] = (df['Wk'] == 6).astype(int)
+    # df['Is_Thanksgiving'] = (df['Wk'] == 47).astype(int)
+    # df['Is_Christmas'] = (df['Wk'] == 52).astype(int)
+    return df
 
 def train_svd():
     """Train the model using SVD for smoothing."""
@@ -52,15 +77,9 @@ def train_svd():
         # Read data for current fold
         train = pd.read_csv(f'{DATA_DIR}/fold_{i+1}/train.csv')
         test = pd.read_csv(f'{DATA_DIR}/fold_{i+1}/test.csv')
-
-        # Define date ranges
-        # start_last_year = pd.to_datetime(test['Date'].min()) - timedelta(days=375)
-        # end_last_year = pd.to_datetime(test['Date'].max()) - timedelta(days=350)
-
-        # Filter train data
-        # tmp_train = train[(train['Date'] > str(start_last_year)) & 
-        #                  (train['Date'] < str(end_last_year))].copy()
-
+        
+             
+           
         departments = train['Dept'].unique()
         logging.info(f"Processing {len(departments)} departments for fold {i+1}")
         
@@ -73,8 +92,9 @@ def train_svd():
             selected_columns = filtered_train[['Store', 'Date', 'Weekly_Sales']]
 
             # Create pivot table and perform SVD
-            X_pivot = selected_columns.pivot(index='Store', columns='Date', 
-                                          values='Weekly_Sales').fillna(0)
+            X_pivot = selected_columns.pivot_table(index='Store', columns='Date', 
+                                          values='Weekly_Sales', aggfunc='mean').fillna(0)
+            
             X_matrix = X_pivot.values
             store_mean = X_matrix.mean(axis=1, keepdims=True)
             X_centered = X_matrix - store_mean
@@ -86,16 +106,38 @@ def train_svd():
             D_tilda[:n_comp] = D[:n_comp]
             X_tilda = U[:, :n_comp] @ np.diag(D_tilda[:n_comp]) @ Vt[:n_comp, :]
             X_smoothed = X_tilda + store_mean
+          
 
             # Convert back to DataFrame
             X_smoothed_df = pd.DataFrame(X_smoothed, index=X_pivot.index, 
                                        columns=X_pivot.columns).reset_index()
+            
             X_original_format = X_smoothed_df.melt(id_vars=['Store'], 
                                                  var_name='Date', 
                                                  value_name='Weekly_Sales')
+            
+            
             X_original_format['Dept'] = department
             X_original_format = X_original_format.sort_values(
                 by=['Store', 'Date']).reset_index(drop=True)
+        
+                    # # Show adjusted sales
+                    # plt.figure(figsize=(12, 6))  # Set the size of the plot
+                    # plt.plot(X_original_format.index, X_original_format['Weekly_Sales'], marker='o', linestyle='-', color='b')  # Plotting sales data
+
+                    # # Customize the plot
+                    # plt.title('Adjusted Weekly Sales Over Time')  # Title of the plot
+                    # plt.xlabel('Date')  # X-axis label
+                    # plt.ylabel('Adjusted Sales')  # Y-axis label
+                    # plt.xticks(rotation=45)  # Rotate x-axis labels for better visibility
+                    # plt.grid()  # Show grid
+                    # plt.tight_layout()  # Adjust layout to prevent clipping of labels
+
+                    # # Show the plot
+                    # plt.show()
+                    # adjusted_sales.fillna(0, inplace=True)
+
+            
 
             # Prepare train-test pairs
             train_pairs = X_original_format[['Store', 'Dept']].drop_duplicates(
@@ -107,11 +149,11 @@ def train_svd():
             # Process training data
             train_split = unique_pairs.merge(train, on=['Store', 'Dept'], how='left')
             train_split = preprocess(train_split)
-            
             # Create model matrices
-            X = patsy.dmatrix('Weekly_Sales + Store + Dept  + IsHoliday+ Yr +I(Yr**2) + Wk',
+            X = patsy.dmatrix('Weekly_Sales + Store + Dept  + Yr + Yr2 +IsHoliday+ Wk',
                               data = train_split,
                               return_type='dataframe')
+            
             
             
             train_split = dict(tuple(X.groupby(['Store', 'Dept'])))
@@ -120,7 +162,9 @@ def train_svd():
             test_split = unique_pairs.merge(test, on=['Store', 'Dept'], how='left')
             test_split = preprocess(test_split)
             
-            X = patsy.dmatrix('Store + Dept + IsHoliday + Yr + I(Yr**2) + Wk',
+            
+            
+            X = patsy.dmatrix('Store + Dept + IsHoliday +Yr + Yr2 +IsHoliday+ Wk',
                                 data = test_split,
                                 return_type='dataframe')
             
@@ -128,6 +172,7 @@ def train_svd():
             test_split = dict(tuple(X.groupby(['Store', 'Dept'])))
             keys = list(train_split)
 
+          
 
             # Train and predict for each store-department combination
             for key in keys:
@@ -167,9 +212,6 @@ def train_svd():
             test_pred.to_csv(f'{DATA_DIR}/fold_{i+1}/mypred.csv', index=False)
             
 
-                # Fit Gradient Boosting model 
-                # model = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=0)
-                # model.fit(X_train, Y)
                 
         fold_time = time() - fold_start
         logging.info(f"Completed fold {i+1} in {fold_time:.1f} seconds")
